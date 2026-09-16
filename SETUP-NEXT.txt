@@ -1,0 +1,25 @@
+MORENA RIDES V5 — SUPABASE CONNECTION
+
+The Supabase Project URL and public publishable key have been connected to this build.
+
+NEXT ACTION — ONLY ONE MAIN STEP:
+1. Open your Supabase project.
+2. Open SQL Editor.
+3. Open schema.sql from this Morena Rides folder.
+4. Paste the entire schema.sql into SQL Editor.
+5. Click Run.
+
+Then test the app:
+- Open index.html through a local web server (or deploy it as a website/PWA).
+- Create one Rider account.
+- Create one Driver account on a second browser/device.
+- Driver goes Online.
+- Rider requests a ride.
+- Driver accepts it.
+- Driver marks Arrived → Start trip → Complete trip.
+
+SECURITY:
+- The value in config.js is a public browser key, not a service-role key.
+- Never add a Supabase secret/service-role key to config.js or any frontend file.
+
+If Supabase email confirmation is enabled, a new account may need email confirmation before it can sign in.
