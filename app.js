@@ -1,44 +1,563 @@
 const C=window.MORENA_CONFIG||{};
-let rate=Number(C.RATE_PER_KM||10),map,pickMarker,destMarker,userPos=null,driverPos=null,driverOnline=false;
+let rate=Number(C.RATE_PER_KM||11),map,pickMarker,destMarker,userPos=null,driverPos=null,driverOnline=false;
+let driverWatchId=null;
 const KEY='morena_v5';
 const localState=JSON.parse(localStorage.getItem(KEY)||'{"rides":[],"driver":null}');
 let sb=null,session=null,profile=null,realtime=null;
+
 if(C.SUPABASE_URL&&C.SUPABASE_ANON_KEY&&window.supabase) sb=window.supabase.createClient(C.SUPABASE_URL,C.SUPABASE_ANON_KEY);
+
 function saveLocal(){localStorage.setItem(KEY,JSON.stringify(localState));renderAll()}
 function id(){return 'MR-'+Date.now().toString(36).toUpperCase()}
 function money(n){return 'R'+Math.round(Number(n)||0)}
 function esc(s){return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
-function show(id){document.querySelectorAll('.screen').forEach(x=>x.classList.remove('active'));document.getElementById(id).classList.add('active');if(id==='home'&&map)setTimeout(()=>map.invalidateSize(),100);renderAll()}
-function initMap(){map=L.map('map').setView([-25.84,25.62],13);L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'}).addTo(map);map.on('click',e=>setDestination(e.latlng.lat,e.latlng.lng))}
-function setDestination(lat,lng){if(destMarker)destMarker.setLatLng([lat,lng]);else destMarker=L.marker([lat,lng]).addTo(map);document.getElementById('destination').value=`Map pin (${lat.toFixed(5)}, ${lng.toFixed(5)})`;if(userPos){const km=distanceKm(userPos.lat,userPos.lng,lat,lng);document.getElementById('fare').textContent=money(km*rate);document.getElementById('destination').dataset.km=km.toFixed(1)}}
-function distanceKm(a,b,c,d){const R=6371,rad=x=>x*Math.PI/180,dLat=rad(c-a),dLon=rad(d-b),x=Math.sin(dLat/2)**2+Math.cos(rad(a))*Math.cos(rad(c))*Math.sin(dLon/2)**2;return R*2*Math.atan2(Math.sqrt(x),Math.sqrt(1-x))}
-function useMyLocation(){if(!navigator.geolocation)return alert('GPS is not available.');navigator.geolocation.getCurrentPosition(p=>{userPos={lat:p.coords.latitude,lng:p.coords.longitude};document.getElementById('pickup').value='My current location';if(pickMarker)pickMarker.setLatLng([userPos.lat,userPos.lng]);else pickMarker=L.marker([userPos.lat,userPos.lng]).addTo(map);map.setView([userPos.lat,userPos.lng],15);if(destMarker){const ll=destMarker.getLatLng(),km=distanceKm(userPos.lat,userPos.lng,ll.lat,ll.lng);document.getElementById('destination').dataset.km=km.toFixed(1);document.getElementById('fare').textContent=money(km*rate)}},()=>alert('Please allow location access.'))}
-async function requestRide(){const dest=document.getElementById('destination').value.trim();if(!dest)return alert('Enter or select a destination first.');let km=Number(document.getElementById('destination').dataset.km||5);if(!isFinite(km)||km<=0)km=5;const payment=document.querySelector('input[name=payment]:checked').value;const fare=Math.max(rate,Math.round(km*rate));
- if(sb&&session){const {data,error}=await sb.from('rides').insert({rider_id:session.user.id,pickup_text:document.getElementById('pickup').value.trim()||'Current location',destination_text:dest,pickup_lat:userPos?.lat||null,pickup_lng:userPos?.lng||null,destination_lat:destMarker?.getLatLng().lat||null,destination_lng:destMarker?.getLatLng().lng||null,distance_km:+km.toFixed(1),fare,payment_method:payment,status:'requested'}).select().single();if(error)return alert(error.message);show('myride');return}
- const ride={id:id(),createdAt:new Date().toISOString(),pickup:document.getElementById('pickup').value.trim()||'Current location',destination:dest,km:+km.toFixed(1),fare,payment,status:'requested',driverId:null,driverName:null};localState.rides.unshift(ride);saveLocal();show('myride')}
-async function currentRide(){if(sb&&session){const {data}=await sb.from('rides').select('*').eq('rider_id',session.user.id).order('created_at',{ascending:false}).limit(1).maybeSingle();return data}return localState.rides[0]}
-function localRideToUi(r){return r?{id:r.id,pickup:r.pickup_text||r.pickup,destination:r.destination_text||r.destination,km:r.distance_km??r.km,fare:r.fare,payment:r.payment_method||r.payment,status:r.status,driverName:r.driverName}:null}
-function rideActions(r){if(!r)return '';if(r.status==='requested')return '<div class="warning">Looking for an available driver…</div>';if(r.status==='accepted')return `<div class="success">Driver ${esc(r.driverName||'has')} accepted your ride.</div>`;if(r.status==='arrived')return '<div class="success">Your driver has arrived.</div>';if(r.status==='in_progress')return '<div class="success">Your trip is in progress.</div>';if(r.status==='completed')return `<div class="success">Trip completed • ${money(r.fare)}</div>`;return ''}
-async function renderCurrent(){const el=document.getElementById('currentRide');let r=await currentRide();r=localRideToUi(r);if(!r){el.innerHTML='<div class="card"><p>No ride requested yet.</p><button onclick="show(\'home\')">Book a ride</button></div>';return}el.innerHTML=`<div class="card"><span class="pill">${esc(r.status.replace('_',' '))}</span><h2>${esc(r.pickup)} → ${esc(r.destination)}</h2><p>${esc(r.km)} km • ${esc(r.payment)}</p><div class="fare"><span>Fare</span><strong>${money(r.fare)}</strong></div>${rideActions(r)}</div>`}
-async function upsertProfile(fields){if(!sb||!session)return;const row={id:session.user.id,...fields,updated_at:new Date().toISOString()};const {error}=await sb.from('profiles').upsert(row);if(error)alert(error.message);else profile=row}
-async function toggleDriver(){if(sb&&session){driverOnline=!driverOnline;await upsertProfile({full_name:document.getElementById('driverName').value||'Morena Driver',role:'driver',vehicle:document.getElementById('vehicle').value||'Vehicle',is_online:driverOnline,lat:driverPos?.lat||null,lng:driverPos?.lng||null});renderAll();return}
- driverOnline=!driverOnline;localState.driver={name:document.getElementById('driverName').value||'Morena Driver',vehicle:document.getElementById('vehicle').value||'Vehicle',online:driverOnline,lat:driverPos?.lat||null,lng:driverPos?.lng||null};saveLocal();if(driverOnline){const r=localState.rides.find(x=>x.status==='requested');if(r){r.status='accepted';r.driverId='demo-driver';r.driverName=localState.driver.name;saveLocal()}}}
-async function driverGPS(){if(!navigator.geolocation)return alert('GPS unavailable.');navigator.geolocation.getCurrentPosition(async p=>{driverPos={lat:p.coords.latitude,lng:p.coords.longitude};if(sb&&session)await upsertProfile({full_name:document.getElementById('driverName').value||'Morena Driver',role:'driver',vehicle:document.getElementById('vehicle').value||'Vehicle',is_online:driverOnline,lat:p.coords.latitude,lng:p.coords.longitude});else{localState.driver={...(localState.driver||{}),lat:p.coords.latitude,lng:p.coords.longitude,online:driverOnline};saveLocal()}document.getElementById('driverLocation').textContent=`GPS updated: ${p.coords.latitude.toFixed(5)}, ${p.coords.longitude.toFixed(5)}`},()=>alert('Please allow location access.'))}
-async function acceptRide(rid){if(!driverOnline)return alert('Go online first.');if(sb&&session){const {error}=await sb.from('rides').update({driver_id:session.user.id,status:'accepted',accepted_at:new Date().toISOString()}).eq('id',rid).eq('status','requested');if(error)alert(error.message);else renderAll();return}const r=localState.rides.find(x=>x.id===rid);if(r){r.status='accepted';r.driverId='demo-driver';r.driverName=localState.driver?.name||'Morena Driver';saveLocal()}}
-async function advanceById(rid,status){if(sb&&session){const patch={status};if(status==='completed')patch.completed_at=new Date().toISOString();const {error}=await sb.from('rides').update(patch).eq('id',rid);if(error)alert(error.message);else renderAll();return}const r=localState.rides.find(x=>x.id===rid);if(r){r.status=status;saveLocal()}}
-async function renderDriver(){const d=sb&&profile?profile:(localState.driver||{});driverOnline=sb&&profile ? !!d.is_online : !!d.online;document.getElementById('driverStatus').textContent=driverOnline?'ONLINE':'Offline';document.getElementById('onlineBtn').textContent=driverOnline?'Go offline':'Go online';if(d.full_name||d.name)document.getElementById('driverName').value=d.full_name||d.name;if(d.vehicle)document.getElementById('vehicle').value=d.vehicle;
- let jobs=[];if(sb&&session){const {data}=await sb.from('rides').select('*').in('status',['requested','accepted','arrived','in_progress']).order('created_at',{ascending:true});jobs=data||[]}else jobs=localState.rides.filter(r=>['requested','accepted','arrived','in_progress'].includes(r.status));
- document.getElementById('driverJobs').innerHTML=jobs.length?jobs.map(r=>{const idv=r.id,st=r.status;return `<div class="job"><h3>${esc(r.pickup_text||r.pickup)} → ${esc(r.destination_text||r.destination)}</h3><p>${esc(r.distance_km??r.km)} km • ${money(r.fare)} • ${esc(r.payment_method||r.payment)}</p>${st==='requested'?`<button onclick="acceptRide('${idv}')">Accept ride</button>`:''}${st==='accepted'?`<button onclick="advanceById('${idv}','arrived')">I have arrived</button>`:''}${st==='arrived'?`<button onclick="advanceById('${idv}','in_progress')">Start trip</button>`:''}${st==='in_progress'?`<button onclick="advanceById('${idv}','completed')">Complete trip</button>`:''}</div>`}).join(''):'<div class="card"><p class="muted">No active ride requests.</p></div>'}
-async function renderAdmin(){let rides=[],online=0;if(sb&&session){const r=await sb.from('rides').select('*').order('created_at',{ascending:false});rides=r.data||[];const p=await sb.from('profiles').select('id').eq('role','driver').eq('is_online',true);online=p.data?.length||0}else{rides=localState.rides;online=driverOnline?1:0}const active=rides.filter(r=>['requested','accepted','arrived','in_progress'].includes(r.status));document.getElementById('driverCount').textContent=online;document.getElementById('activeCount').textContent=active.length;document.getElementById('todayCount').textContent=rides.length;document.getElementById('adminRides').innerHTML=rides.length?rides.map(r=>`<div class="job"><strong>${esc(r.id)}</strong><div>${esc(r.pickup_text||r.pickup)} → ${esc(r.destination_text||r.destination)}</div><small>${esc(r.status)} • ${money(r.fare)} • ${esc(r.payment_method||r.payment)}</small></div>`).join(''):'<p class="muted">No rides yet.</p>'}
-function setRate(v){rate=Math.max(1,Number(v)||10);C.RATE_PER_KM=rate;localStorage.setItem('morena_rate',rate);document.getElementById('fare').textContent=money((Number(document.getElementById('destination').dataset.km)||5)*rate)}
-async function renderAll(){renderCurrent();renderDriver();renderAdmin();document.getElementById('rateInput').value=rate;document.getElementById('backendStatus').textContent=sb?(session?'Connected • '+(profile?.role||'account'):'Supabase configured • sign in'):'Demo mode • local only'}
-async function signUp(){if(!sb)return alert('Add Supabase settings first.');const name=document.getElementById('authName').value.trim(),email=document.getElementById('authEmail').value.trim(),pass=document.getElementById('authPassword').value,role=document.getElementById('authRole').value,phone=document.getElementById('authPhone').value.trim();if(!name||!email||pass.length<6)return alert('Enter name, email and a password of at least 6 characters.');const {data,error}=await sb.auth.signUp({email,password:pass});if(error)return alert(error.message);if(data.user){session=data.session||null;if(session){await upsertProfile({full_name:name,role:role==='driver'?'driver':'rider',phone});}alert(data.session?'Account created.':'Account created. Check your email to confirm, then sign in.')}}
-async function signIn(){if(!sb)return alert('Add Supabase settings first.');const email=document.getElementById('authEmail').value.trim(),pass=document.getElementById('authPassword').value;const {data,error}=await sb.auth.signInWithPassword({email,password:pass});if(error)return alert(error.message);session=data.session;await loadProfile();closeAuth()}
-async function signOut(){if(sb)await sb.auth.signOut();session=null;profile=null;if(realtime){sb.removeChannel(realtime);realtime=null}renderAll()}
-function openAuth(){document.getElementById('auth').classList.add('active')}
-function closeAuth(){document.getElementById('auth').classList.remove('active')}
-async function loadProfile(){if(!sb||!session)return;const {data}=await sb.from('profiles').select('*').eq('id',session.user.id).maybeSingle();profile=data;if(!profile){await upsertProfile({full_name:session.user.email?.split('@')[0]||'Morena User',role:'rider'});}}
-function subscribe(){if(!sb)return;realtime=sb.channel('morena-live').on('postgres_changes',{event:'*',schema:'public',table:'rides'},()=>renderAll()).on('postgres_changes',{event:'*',schema:'public',table:'profiles'},()=>renderAll()).subscribe()}
-async function boot(){rate=Number(localStorage.getItem('morena_rate')||rate);initMap();if(sb){const {data}=await sb.auth.getSession();session=data.session;if(session)await loadProfile();sb.auth.onAuthStateChange(async(_e,s)=>{session=s;if(session)await loadProfile();renderAll()});subscribe()}renderAll()}
-function clearDemo(){if(confirm('Reset all Morena Rides local demo data?')){localStorage.removeItem(KEY);location.reload()}}
+
+function show(id){
+  document.querySelectorAll('.screen').forEach(x=>x.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  if(id==='home'&&map)setTimeout(()=>map.invalidateSize(),100);
+  renderAll()
+}
+
+function initMap(){
+  map=L.map('map').setView([-25.84,25.62],13);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+    maxZoom:19,
+    attribution:'© OpenStreetMap'
+  }).addTo(map);
+  map.on('click',e=>setDestination(e.latlng.lat,e.latlng.lng))
+}
+
+function setDestination(lat,lng){
+  if(destMarker)destMarker.setLatLng([lat,lng]);
+  else destMarker=L.marker([lat,lng]).addTo(map);
+  document.getElementById('destination').value=`Map pin (${lat.toFixed(5)}, ${lng.toFixed(5)})`;
+  if(userPos){
+    const km=distanceKm(userPos.lat,userPos.lng,lat,lng);
+    document.getElementById('fare').textContent=money(km*rate);
+    document.getElementById('destination').dataset.km=km.toFixed(1)
+  }
+}
+
+function distanceKm(a,b,c,d){
+  const R=6371,rad=x=>x*Math.PI/180,dLat=rad(c-a),dLon=rad(d-b);
+  const x=Math.sin(dLat/2)**2+Math.cos(rad(a))*Math.cos(rad(c))*Math.sin(dLon/2)**2;
+  return R*2*Math.atan2(Math.sqrt(x),Math.sqrt(1-x))
+}
+
+function useMyLocation(){
+  if(!navigator.geolocation)return alert('GPS is not available.');
+  navigator.geolocation.getCurrentPosition(p=>{
+    userPos={lat:p.coords.latitude,lng:p.coords.longitude};
+    document.getElementById('pickup').value='My current location';
+    if(pickMarker)pickMarker.setLatLng([userPos.lat,userPos.lng]);
+    else pickMarker=L.marker([userPos.lat,userPos.lng]).addTo(map);
+    map.setView([userPos.lat,userPos.lng],15);
+    if(destMarker){
+      const ll=destMarker.getLatLng(),km=distanceKm(userPos.lat,userPos.lng,ll.lat,ll.lng);
+      document.getElementById('destination').dataset.km=km.toFixed(1);
+      document.getElementById('fare').textContent=money(km*rate)
+    }
+  },()=>alert('Please allow location access.'))
+}
+
+async function requestRide(){
+  const dest=document.getElementById('destination').value.trim();
+  if(!dest)return alert('Enter or select a destination first.');
+  let km=Number(document.getElementById('destination').dataset.km||5);
+  if(!isFinite(km)||km<=0)km=5;
+  const payment=document.querySelector('input[name=payment]:checked').value;
+  const fare=Math.max(rate,Math.round(km*rate));
+
+  if(sb&&session){
+    const {data,error}=await sb.from('rides').insert({
+      rider_id:session.user.id,
+      pickup_text:document.getElementById('pickup').value.trim()||'Current location',
+      destination_text:dest,
+      pickup_lat:userPos?.lat||null,
+      pickup_lng:userPos?.lng||null,
+      destination_lat:destMarker?.getLatLng().lat||null,
+      destination_lng:destMarker?.getLatLng().lng||null,
+      distance_km:+km.toFixed(1),
+      fare,
+      payment_method:payment,
+      status:'requested'
+    }).select().single();
+
+    if(error)return alert(error.message);
+    show('myride');
+    return
+  }
+
+  const ride={
+    id:id(),
+    createdAt:new Date().toISOString(),
+    pickup:document.getElementById('pickup').value.trim()||'Current location',
+    destination:dest,
+    km:+km.toFixed(1),
+    fare,
+    payment,
+    status:'requested',
+    driverId:null,
+    driverName:null
+  };
+
+  localState.rides.unshift(ride);
+  saveLocal();
+  show('myride')
+}
+
+async function currentRide(){
+  if(sb&&session){
+    const {data}=await sb.from('rides').select('*')
+      .eq('rider_id',session.user.id)
+      .order('created_at',{ascending:false})
+      .limit(1)
+      .maybeSingle();
+    return data
+  }
+  return localState.rides[0]
+}
+
+function localRideToUi(r){
+  return r?{
+    id:r.id,
+    pickup:r.pickup_text||r.pickup,
+    destination:r.destination_text||r.destination,
+    km:r.distance_km??r.km,
+    fare:r.fare,
+    payment:r.payment_method||r.payment,
+    status:r.status,
+    driverName:r.driverName
+  }:null
+}
+
+function rideActions(r){
+  if(!r)return '';
+  if(r.status==='requested')return '<div class="warning">Looking for an available driver…</div>';
+  if(r.status==='accepted')return `<div class="success">Driver ${esc(r.driverName||'has')} accepted your ride.</div>`;
+  if(r.status==='arrived')return '<div class="success">Your driver has arrived.</div>';
+  if(r.status==='in_progress')return '<div class="success">Your trip is in progress.</div>';
+  if(r.status==='completed')return `<div class="success">Trip completed • ${money(r.fare)}</div>`;
+  return ''
+}
+
+async function renderCurrent(){
+  const el=document.getElementById('currentRide');
+  let r=await currentRide();
+  r=localRideToUi(r);
+
+  if(!r){
+    el.innerHTML='<div class="card"><p>No ride requested yet.</p><button onclick="show(\'home\')">Book a ride</button></div>';
+    return
+  }
+
+  el.innerHTML=`<div class="card">
+    <span class="pill">${esc(r.status.replace('_',' '))}</span>
+    <h2>${esc(r.pickup)} → ${esc(r.destination)}</h2>
+    <p>${esc(r.km)} km • ${esc(r.payment)}</p>
+    <div class="fare"><span>Fare</span><strong>${money(r.fare)}</strong></div>
+    ${rideActions(r)}
+  </div>`
+}
+
+async function upsertProfile(fields){
+  if(!sb||!session)return;
+  const row={
+    id:session.user.id,
+    ...fields,
+    updated_at:new Date().toISOString()
+  };
+  const {error}=await sb.from('profiles').upsert(row);
+  if(error)alert(error.message);
+  else profile=row
+}
+
+async function toggleDriver(){
+  if(sb&&session){
+    driverOnline=!driverOnline;
+
+    await upsertProfile({
+      full_name:document.getElementById('driverName').value||'Morena Driver',
+      role:'driver',
+      vehicle:document.getElementById('vehicle').value||'Vehicle',
+      is_online:driverOnline,
+      lat:driverPos?.lat||null,
+      lng:driverPos?.lng||null
+    });
+
+    renderAll();
+    return
+  }
+
+  driverOnline=!driverOnline;
+
+  localState.driver={
+    name:document.getElementById('driverName').value||'Morena Driver',
+    vehicle:document.getElementById('vehicle').value||'Vehicle',
+    online:driverOnline,
+    lat:driverPos?.lat||null,
+    lng:driverPos?.lng||null
+  };
+
+  saveLocal();
+
+  if(driverOnline){
+    const r=localState.rides.find(x=>x.status==='requested');
+    if(r){
+      r.status='accepted';
+      r.driverId='demo-driver';
+      r.driverName=localState.driver.name;
+      saveLocal()
+    }
+  }
+}
+
+async function driverGPS(){
+  if(!navigator.geolocation)return alert('GPS unavailable.');
+
+  if(driverWatchId!==null){
+    navigator.geolocation.clearWatch(driverWatchId);
+    driverWatchId=null;
+    document.getElementById('driverLocation').textContent='GPS watcher stopped.';
+    return
+  }
+
+  driverWatchId=navigator.geolocation.watchPosition(async p=>{
+    driverPos={
+      lat:p.coords.latitude,
+      lng:p.coords.longitude
+    };
+
+    if(sb&&session){
+      await upsertProfile({
+        full_name:document.getElementById('driverName').value||'Morena Driver',
+        role:'driver',
+        vehicle:document.getElementById('vehicle').value||'Vehicle',
+        is_online:driverOnline,
+        lat:p.coords.latitude,
+        lng:p.coords.longitude
+      });
+    }else{
+      localState.driver={
+        ...(localState.driver||{}),
+        lat:p.coords.latitude,
+        lng:p.coords.longitude,
+        online:driverOnline
+      };
+      saveLocal()
+    }
+
+    document.getElementById('driverLocation').textContent=
+      `GPS updated: ${p.coords.latitude.toFixed(5)}, ${p.coords.longitude.toFixed(5)}`;
+
+  },()=>{
+    alert('Please allow location access.');
+
+    if(driverWatchId!==null){
+      navigator.geolocation.clearWatch(driverWatchId);
+      driverWatchId=null
+    }
+
+  },{
+    enableHighAccuracy:true,
+    maximumAge:5000,
+    timeout:15000
+  });
+}
+
+async function acceptRide(rid){
+  if(!driverOnline)return alert('Go online first.');
+
+  if(sb&&session){
+    const {error}=await sb.from('rides').update({
+      driver_id:session.user.id,
+      status:'accepted',
+      accepted_at:new Date().toISOString()
+    }).eq('id',rid).eq('status','requested');
+
+    if(error)alert(error.message);
+    else renderAll();
+    return
+  }
+
+  const r=localState.rides.find(x=>x.id===rid);
+
+  if(r){
+    r.status='accepted';
+    r.driverId='demo-driver';
+    r.driverName=localState.driver?.name||'Morena Driver';
+    saveLocal()
+  }
+}
+
+async function advanceById(rid,status){
+  if(sb&&session){
+    const patch={status};
+    if(status==='completed')patch.completed_at=new Date().toISOString();
+
+    const {error}=await sb.from('rides').update(patch).eq('id',rid);
+
+    if(error)alert(error.message);
+    else renderAll();
+    return
+  }
+
+  const r=localState.rides.find(x=>x.id===rid);
+
+  if(r){
+    r.status=status;
+    saveLocal()
+  }
+}
+
+async function renderDriver(){
+  const d=sb&&profile?profile:(localState.driver||{});
+
+  driverOnline=sb&&profile ? !!d.is_online : !!d.online;
+
+  document.getElementById('driverStatus').textContent=driverOnline?'ONLINE':'Offline';
+  document.getElementById('onlineBtn').textContent=driverOnline?'Go offline':'Go online';
+
+  if(d.full_name||d.name)
+    document.getElementById('driverName').value=d.full_name||d.name;
+
+  if(d.vehicle)
+    document.getElementById('vehicle').value=d.vehicle;
+
+  let jobs=[];
+
+  if(sb&&session){
+    const {data}=await sb.from('rides').select('*')
+      .in('status',['requested','accepted','arrived','in_progress'])
+      .order('created_at',{ascending:true});
+    jobs=data||[]
+  }else{
+    jobs=localState.rides.filter(r=>['requested','accepted','arrived','in_progress'].includes(r.status))
+  }
+
+  document.getElementById('driverJobs').innerHTML=jobs.length?
+    jobs.map(r=>{
+      const idv=r.id,st=r.status;
+
+      return `<div class="job">
+        <h3>${esc(r.pickup_text||r.pickup)} → ${esc(r.destination_text||r.destination)}</h3>
+        <p>${esc(r.distance_km??r.km)} km • ${money(r.fare)} • ${esc(r.payment_method||r.payment)}</p>
+        ${st==='requested'?`<button onclick="acceptRide('${idv}')">Accept ride</button>`:''}
+        ${st==='accepted'?`<button onclick="advanceById('${idv}','arrived')">I have arrived</button>`:''}
+        ${st==='arrived'?`<button onclick="advanceById('${idv}','in_progress')">Start trip</button>`:''}
+        ${st==='in_progress'?`<button onclick="advanceById('${idv}','completed')">Complete trip</button>`:''}
+      </div>`
+    }).join('')
+    :
+    '<div class="card"><p class="muted">No active ride requests.</p></div>'
+}
+
+async function renderAdmin(){
+  let rides=[],online=0;
+
+  if(sb&&session){
+    const r=await sb.from('rides').select('*').order('created_at',{ascending:false});
+    rides=r.data||[];
+
+    const p=await sb.from('profiles').select('id')
+      .eq('role','driver')
+      .eq('is_online',true);
+
+    online=p.data?.length||0
+  }else{
+    rides=localState.rides;
+    online=driverOnline?1:0
+  }
+
+  const active=rides.filter(r=>['requested','accepted','arrived','in_progress'].includes(r.status));
+
+  document.getElementById('driverCount').textContent=online;
+  document.getElementById('activeCount').textContent=active.length;
+  document.getElementById('todayCount').textContent=rides.length;
+
+  document.getElementById('adminRides').innerHTML=rides.length?
+    rides.map(r=>`
+      <div class="job">
+        <strong>${esc(r.id)}</strong>
+        <div>${esc(r.pickup_text||r.pickup)} → ${esc(r.destination_text||r.destination)}</div>
+        <small>${esc(r.status)} • ${money(r.fare)} • ${esc(r.payment_method||r.payment)}</small>
+      </div>`
+    ).join('')
+    :
+    '<p class="muted">No rides yet.</p>'
+}
+
+function setRate(v){
+  rate=Math.max(1,Number(v)||11);
+  C.RATE_PER_KM=rate;
+  localStorage.setItem('morena_rate',rate);
+
+  document.getElementById('fare').textContent=
+    money((Number(document.getElementById('destination').dataset.km)||5)*rate)
+}
+
+async function renderAll(){
+  renderCurrent();
+  renderDriver();
+  renderAdmin();
+
+  document.getElementById('rateInput').value=rate;
+
+  document.getElementById('backendStatus').textContent=
+    sb?
+      (session?'Connected • '+(profile?.role||'account'):'Supabase configured • sign in')
+      :
+      'Demo mode • local only'
+}
+
+async function signUp(){
+  if(!sb)return alert('Add Supabase settings first.');
+
+  const name=document.getElementById('authName').value.trim();
+  const email=document.getElementById('authEmail').value.trim();
+  const pass=document.getElementById('authPassword').value;
+  const role=document.getElementById('authRole').value;
+  const phone=document.getElementById('authPhone').value.trim();
+
+  if(!name||!email||pass.length<6)
+    return alert('Enter name, email and a password of at least 6 characters.');
+
+  const {data,error}=await sb.auth.signUp({
+    email,
+    password:pass
+  });
+
+  if(error)return alert(error.message);
+
+  if(data.user){
+    session=data.session||null;
+
+    if(session){
+      await upsertProfile({
+        full_name:name,
+        role:role==='driver'?'driver':'rider',
+        phone
+      });
+    }
+
+    alert(
+      data.session?
+      'Account created.':
+      'Account created. Check your email to confirm, then sign in.'
+    )
+  }
+}
+
+async function signIn(){
+  if(!sb)return alert('Add Supabase settings first.');
+
+  const email=document.getElementById('authEmail').value.trim();
+  const pass=document.getElementById('authPassword').value;
+
+  const {data,error}=await sb.auth.signInWithPassword({
+    email,
+    password:pass
+  });
+
+  if(error)return alert(error.message);
+
+  session=data.session;
+  await loadProfile();
+  closeAuth()
+}
+
+async function signOut(){
+  if(sb)await sb.auth.signOut();
+
+  session=null;
+  profile=null;
+
+  if(realtime){
+    sb.removeChannel(realtime);
+    realtime=null
+  }
+
+  renderAll()
+}
+
+function openAuth(){
+  document.getElementById('auth').classList.add('active')
+}
+
+function closeAuth(){
+  document.getElementById('auth').classList.remove('active')
+}
+
+async function loadProfile(){
+  if(!sb||!session)return;
+
+  const {data}=await sb.from('profiles').select('*')
+    .eq('id',session.user.id)
+    .maybeSingle();
+
+  profile=data;
+
+  if(!profile){
+    await upsertProfile({
+      full_name:session.user.email?.split('@')[0]||'Morena User',
+      role:'rider'
+    });
+  }
+}
+
+function subscribe(){
+  if(!sb)return;
+
+  realtime=sb.channel('morena-live')
+    .on('postgres_changes',{
+      event:'*',
+      schema:'public',
+      table:'rides'
+    },()=>renderAll())
+    .on('postgres_changes',{
+      event:'*',
+      schema:'public',
+      table:'profiles'
+    },()=>renderAll())
+    .subscribe()
+}
+
+async function boot(){
+  const savedRate=localStorage.getItem('morena_rate');
+
+  if(savedRate===null||Number(savedRate)===10){
+    rate=11;
+    localStorage.setItem('morena_rate','11')
+  }else{
+    rate=Number(savedRate)||11
+  }
+
+  initMap();
+
+  if(sb){
+    const {data}=await sb.auth.getSession();
+    session=data.session;
+
+    if(session)await loadProfile();
+
+    sb.auth.onAuthStateChange(async(_e,s)=>{
+      session=s;
+      if(session)await loadProfile();
+      renderAll()
+    });
+
+    subscribe()
+  }
+
+  renderAll()
+}
+
+function clearDemo(){
+  if(confirm('Reset all Morena Rides local demo data?')){
+    localStorage.removeItem(KEY);
+    location.reload()
+  }
+}
+
 window.addEventListener('load',boot);
