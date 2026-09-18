@@ -119,6 +119,7 @@ async function currentRide(){
   return localState.rides[0]
 }
 
+```js
 function localRideToUi(r){
   return r?{
     id:r.id,
@@ -128,20 +129,72 @@ function localRideToUi(r){
     fare:r.fare,
     payment:r.payment_method||r.payment,
     status:r.status,
-    driverName:r.driverName
+    driverName:r.driverName,
+    driver_id:r.driver_id||null,
+    pickup_lat:r.pickup_lat??null,
+    pickup_lng:r.pickup_lng??null
   }:null
+}
+```
+
+
+```js
+async function getDriverEta(r){
+  if(!sb||!r||!r.driver_id)return '';
+
+  const {data,error}=await sb.from('profiles')
+    .select('full_name,vehicle,is_online,lat,lng')
+    .eq('id',r.driver_id)
+    .eq('role','driver')
+    .maybeSingle();
+
+  if(error||!data||data.lat==null||data.lng==null)return '';
+
+  const pickupLat=r.pickup_lat;
+  const pickupLng=r.pickup_lng;
+
+  if(pickupLat==null||pickupLng==null)return '';
+
+  const km=distanceKm(
+    Number(data.lat),
+    Number(data.lng),
+    Number(pickupLat),
+    Number(pickupLng)
+  );
+
+  const speedKmh=30;
+  const minutes=Math.max(1,Math.round((km/speedKmh)*60));
+
+  return `<div class="success">
+    Driver ${esc(data.full_name||'has')} accepted your ride.<br>
+    Driver is approximately ${km.toFixed(1)} km away.<br>
+    Estimated arrival: about ${minutes} min
+  </div>`;
 }
 
 function rideActions(r){
   if(!r)return '';
-  if(r.status==='requested')return '<div class="warning">Looking for an available driver…</div>';
-  if(r.status==='accepted')return `<div class="success">Driver ${esc(r.driverName||'has')} accepted your ride.</div>`;
-  if(r.status==='arrived')return '<div class="success">Your driver has arrived.</div>';
-  if(r.status==='in_progress')return '<div class="success">Your trip is in progress.</div>';
-  if(r.status==='completed')return `<div class="success">Trip completed • ${money(r.fare)}</div>`;
-  return ''
-}
+  if(r.status==='requested')
+    return '<div class="warning">Looking for an available driver…</div>';
 
+  if(r.status==='accepted')
+    return `<div id="driverEta" class="success">Checking driver location…</div>`;
+
+  if(r.status==='arrived')
+    return '<div class="success">Your driver has arrived.</div>';
+
+  if(r.status==='in_progress')
+    return '<div class="success">Your trip is in progress.</div>';
+
+  if(r.status==='completed')
+    return `<div class="success">Trip completed • ${money(r.fare)}</div>`;
+
+  return '';
+}
+```
+
+
+```js
 async function renderCurrent(){
   const el=document.getElementById('currentRide');
   let r=await currentRide();
@@ -152,14 +205,28 @@ async function renderCurrent(){
     return
   }
 
+  let actions=rideActions(r);
+
   el.innerHTML=`<div class="card">
     <span class="pill">${esc(r.status.replace('_',' '))}</span>
     <h2>${esc(r.pickup)} → ${esc(r.destination)}</h2>
     <p>${esc(r.km)} km • ${esc(r.payment)}</p>
     <div class="fare"><span>Fare</span><strong>${money(r.fare)}</strong></div>
-    ${rideActions(r)}
-  </div>`
+    ${actions}
+  </div>`;
+
+  if(r.status==='accepted'&&sb&&r.driver_id){
+    const eta=await getDriverEta(r);
+
+    const etaEl=document.getElementById('driverEta');
+
+    if(etaEl&&eta){
+      etaEl.outerHTML=eta;
+    }
+  }
 }
+```
+
 
 async function upsertProfile(fields){
   if(!sb||!session)return;
