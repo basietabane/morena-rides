@@ -1,3 +1,62 @@
+const C=window.MORENA_CONFIG||{};
+let rate=Number(C.RATE_PER_KM||11),map,pickMarker,destMarker,userPos=null,driverPos=null,driverOnline=false;
+let driverWatchId=null;
+const KEY='morena_v5';
+const localState=JSON.parse(localStorage.getItem(KEY)||'{"rides":[],"driver":null}');
+let sb=null,session=null,profile=null,realtime=null;
+
+if(C.SUPABASE_URL&&C.SUPABASE_ANON_KEY&&window.supabase) sb=window.supabase.createClient(C.SUPABASE_URL,C.SUPABASE_ANON_KEY);
+
+function saveLocal(){localStorage.setItem(KEY,JSON.stringify(localState));renderAll()}
+function id(){return 'MR-'+Date.now().toString(36).toUpperCase()}
+function money(n){return 'R'+Math.round(Number(n)||0)}
+function esc(s){return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
+
+function show(id){
+  document.querySelectorAll('.screen').forEach(x=>x.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  if(id==='home'&&map)setTimeout(()=>map.invalidateSize(),100);
+  renderAll()
+}
+
+function initMap(){
+  map=L.map('map').setView([-25.84,25.62],13);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+    maxZoom:19,
+    attribution:'© OpenStreetMap'
+  }).addTo(map);
+  map.on('click',e=>setDestination(e.latlng.lat,e.latlng.lng))
+}
+
+function setDestination(lat,lng){
+  if(destMarker)destMarker.setLatLng([lat,lng]);
+  else destMarker=L.marker([lat,lng]).addTo(map);
+  document.getElementById('destination').value=`Map pin (${lat.toFixed(5)}, ${lng.toFixed(5)})`;
+  if(userPos){
+    const km=distanceKm(userPos.lat,userPos.lng,lat,lng);
+    document.getElementById('fare').textContent=money(km*rate);
+    document.getElementById('destination').dataset.km=km.toFixed(1)
+  }
+}
+
+function distanceKm(a,b,c,d){
+  const R=6371,rad=x=>x*Math.PI/180,dLat=rad(c-a),dLon=rad(d-b);
+  const x=Math.sin(dLat/2)**2+Math.cos(rad(a))*Math.cos(rad(c))*Math.sin(dLon/2)**2;
+  return R*2*Math.atan2(Math.sqrt(x),Math.sqrt(1-x))
+}
+
+function useMyLocation(){
+  if(!navigator.geolocation)return alert('GPS is not available.');
+  navigator.geolocation.getCurrentPosition(p=>{
+    userPos={lat:p.coords.latitude,lng:p.coords.longitude};
+    document.getElementById('pickup').value='My current location';
+    if(pickMarker)pickMarker.setLatLng([userPos.lat,userPos.lng]);
+    else pickMarker=L.marker([userPos.lat,userPos.lng]).addTo(map);
+    map.setView([userPos.lat,userPos.lng],15);
+    if(destMarker){
+      const ll=destMarker.getLatLng(),km=distanceKm(userPos.lat,userPos.lng,ll.lat,ll.lng);
+      document.getElementById('destination').dataset.km=km.toFixed(1);
+      document.getElementById('fare').textContent=money(km*rate)
     }
   },()=>alert('Please allow location access.'))
 }
@@ -60,7 +119,6 @@ async function currentRide(){
   return localState.rides[0]
 }
 
-
 function localRideToUi(r){
   return r?{
     id:r.id,
@@ -70,39 +128,10 @@ function localRideToUi(r){
     fare:r.fare,
     payment:r.payment_method||r.payment,
     status:r.status,
-    driverName:r.driverName,
-    driverId:r.driver_id||r.driverId,
-    pickupLat:r.pickup_lat,
-    pickupLng:r.pickup_lng
+    driverName:r.driverName
   }:null
 }
-async function getDriverEta(r){
-  if(!sb||!r?.driverId||r.pickupLat==null||r.pickupLng==null)return '';
 
-  const {data,error}=await sb.from('profiles')
-    .select('full_name,vehicle,lat,lng,is_online')
-    .eq('id',r.driverId)
-    .maybeSingle();
-
-  if(error||!data||data.lat==null||data.lng==null)return '';
-
-  const km=distanceKm(
-    Number(data.lat),
-    Number(data.lng),
-    Number(r.pickupLat),
-    Number(r.pickupLng)
-  );
-
-  const speed=30;
-  const minutes=Math.max(1,Math.round((km/speed)*60));
-
-  return `
-    <div class="success">
-      🚗 Driver is ${km.toFixed(1)} km away<br>
-      ⏱️ Estimated arrival: about ${minutes} min
-    </div>
-  `;
-}
 function rideActions(r){
   if(!r)return '';
   if(r.status==='requested')return '<div class="warning">Looking for an available driver…</div>';
@@ -123,19 +152,12 @@ async function renderCurrent(){
     return
   }
 
-  let eta='';
-
-  if(['accepted','arrived','in_progress'].includes(r.status)){
-    eta=await getDriverEta(r);
-  }
-
   el.innerHTML=`<div class="card">
     <span class="pill">${esc(r.status.replace('_',' '))}</span>
     <h2>${esc(r.pickup)} → ${esc(r.destination)}</h2>
     <p>${esc(r.km)} km • ${esc(r.payment)}</p>
     <div class="fare"><span>Fare</span><strong>${money(r.fare)}</strong></div>
     ${rideActions(r)}
-    ${eta}
   </div>`
 }
 
